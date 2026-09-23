@@ -1,0 +1,11 @@
+- name: example
+  command: "cargo build"
+  color: '#74ACDF'
+- name: dep example
+  command: [cargo, build]
+  dependencies: [echo]
+  watchlist: [".*\\.txt"]
+  color: '#CDC1FF'
+- name: echo
+  run-as-shell: true
+  command: "cat test/test.txt"
