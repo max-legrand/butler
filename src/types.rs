@@ -29,6 +29,7 @@ pub struct ServiceSchema {
     #[serde(default)]
     pub dependencies: Option<Vec<String>>,
     /// Optional regex patterns matched against working-directory-relative paths.
+    /// Patterns are anchored to the start of the path automatically.
     /// A matching change reruns this leaf service's prerequisites before the service.
     #[serde(default)]
     pub watchlist: Option<Vec<String>>,

@@ -5,8 +5,11 @@ use crate::logger::Logger;
 use crate::types::{CommandSpec, Graph, State};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -27,6 +30,11 @@ struct WatchTarget {
 struct WatchexecHandle {
     events: mpsc::Receiver<HashSet<usize>>,
     thread: thread::JoinHandle<Result<(), String>>,
+}
+
+struct ServiceChild {
+    process: Child,
+    output_threads: Vec<thread::JoinHandle<()>>,
 }
 
 /// Run prerequisite commands, then supervise leaf services and restart them on watched changes.
@@ -147,7 +155,8 @@ fn compile_watch_targets(graph: &Graph, leaves: &[usize]) -> Result<Vec<WatchTar
             .unwrap_or_default()
             .iter()
             .map(|pattern| {
-                Regex::new(pattern).map_err(|error| {
+                let anchored = format!("^(?:{pattern})$");
+                Regex::new(&anchored).map_err(|error| {
                     format!("invalid watch pattern for {}: {error}", node.service.name)
                 })
             })
@@ -267,7 +276,7 @@ fn run_prerequisites(
         }
         let (service_name, service_color) = service_details(graph, index)?;
         set_state(graph, index, State::Ready)?;
-        let mut child = match spawn_service(graph, index) {
+        let mut child = match spawn_service(graph, index, logger) {
             Ok(child) => child,
             Err(error) => {
                 set_state(graph, index, State::Failed)?;
@@ -286,9 +295,11 @@ fn run_prerequisites(
                 return Ok(true);
             }
             if let Some(status) = child
+                .process
                 .try_wait()
                 .map_err(|error| format!("failed to check prerequisite {service_name}: {error}"))?
             {
+                terminate_child(&mut child)?;
                 if status.success() {
                     set_state(graph, index, State::Succeeded)?;
                     logger.service(
@@ -332,11 +343,11 @@ fn prerequisite_closure(graph: &Graph, order: &[usize], targets: &HashSet<usize>
 fn start_service(
     graph: &mut Graph,
     index: usize,
-    children: &mut HashMap<usize, Child>,
+    children: &mut HashMap<usize, ServiceChild>,
     logger: Logger,
 ) -> Result<(), String> {
     set_state(graph, index, State::Ready)?;
-    let child = match spawn_service(graph, index) {
+    let child = match spawn_service(graph, index, logger) {
         Ok(child) => child,
         Err(error) => {
             set_state(graph, index, State::Failed)?;
@@ -350,7 +361,7 @@ fn start_service(
     Ok(())
 }
 
-fn spawn_service(graph: &Graph, index: usize) -> Result<Child, String> {
+fn spawn_service(graph: &Graph, index: usize, logger: Logger) -> Result<ServiceChild, String> {
     let Some(node) = graph.nodes.get(index) else {
         return Err("invalid graph node index".to_owned());
     };
@@ -374,9 +385,53 @@ fn spawn_service(graph: &Graph, index: usize) -> Result<Child, String> {
             ));
         }
     };
-    command
+    #[cfg(unix)]
+    command.process_group(0);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut process = command
         .spawn()
-        .map_err(|error| format!("failed to start service {}: {error}", service.name))
+        .map_err(|error| format!("failed to start service {}: {error}", service.name))?;
+    let service_name = service.name.clone();
+    let service_color = service.color.clone();
+    let mut output_threads = Vec::new();
+    if let Some(stdout) = process.stdout.take() {
+        output_threads.push(log_output(
+            stdout,
+            service_name.clone(),
+            service_color.clone(),
+            logger,
+        ));
+    }
+    if let Some(stderr) = process.stderr.take() {
+        output_threads.push(log_output(stderr, service_name, service_color, logger));
+    }
+    Ok(ServiceChild {
+        process,
+        output_threads,
+    })
+}
+
+fn log_output<R: std::io::Read + Send + 'static>(
+    stream: R,
+    service_name: String,
+    service_color: Option<String>,
+    logger: Logger,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            match line {
+                Ok(line) => logger.service(&service_name, service_color.as_deref(), line),
+                Err(error) => {
+                    logger.service(
+                        &service_name,
+                        service_color.as_deref(),
+                        format!("failed to read service output: {error}"),
+                    );
+                    break;
+                }
+            }
+        }
+    })
 }
 
 fn direct_command(arguments: &[String], service_name: &str) -> Result<Command, String> {
@@ -403,11 +458,11 @@ fn shell_command(source: &str) -> Command {
     }
 }
 
-fn poll_children(graph: &mut Graph, children: &mut HashMap<usize, Child>, logger: Logger) {
+fn poll_children(graph: &mut Graph, children: &mut HashMap<usize, ServiceChild>, logger: Logger) {
     let indices: Vec<usize> = children.keys().copied().collect();
     for index in indices {
         let status = match children.get_mut(&index) {
-            Some(child) => child.try_wait(),
+            Some(child) => child.process.try_wait(),
             None => continue,
         };
         match status {
@@ -417,6 +472,13 @@ fn poll_children(graph: &mut Graph, children: &mut HashMap<usize, Child>, logger
                 } else {
                     State::Failed
                 };
+                if let Some(mut child) = children.remove(&index)
+                    && let Err(error) = terminate_child(&mut child)
+                {
+                    logger.warn(format!(
+                        "failed to stop descendants of service {index}: {error}"
+                    ));
+                }
                 if let Err(error) = set_state(graph, index, state) {
                     logger.error(error);
                 }
@@ -426,7 +488,6 @@ fn poll_children(graph: &mut Graph, children: &mut HashMap<usize, Child>, logger
                     }
                     Err(error) => logger.error(error),
                 }
-                children.remove(&index);
             }
             Ok(None) => {}
             Err(error) => logger.error(format!("failed to poll service {index}: {error}")),
@@ -434,19 +495,35 @@ fn poll_children(graph: &mut Graph, children: &mut HashMap<usize, Child>, logger
     }
 }
 
-fn terminate_child(child: &mut Child) -> Result<(), String> {
+fn terminate_child(child: &mut ServiceChild) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let process_id = i32::try_from(child.process.id()).map_err(|error| error.to_string())?;
+        if let Err(error) = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(process_id),
+            nix::sys::signal::Signal::SIGKILL,
+        ) && error != nix::errno::Errno::ESRCH
+        {
+            return Err(error.to_string());
+        }
+    }
     if child
+        .process
         .try_wait()
         .map_err(|error| error.to_string())?
         .is_none()
     {
-        child.kill().map_err(|error| error.to_string())?;
-        child.wait().map_err(|error| error.to_string())?;
+        #[cfg(not(unix))]
+        child.process.kill().map_err(|error| error.to_string())?;
+        child.process.wait().map_err(|error| error.to_string())?;
+    }
+    for output_thread in child.output_threads.drain(..) {
+        let _ = output_thread.join();
     }
     Ok(())
 }
 
-fn stop_children(graph: &mut Graph, children: &mut HashMap<usize, Child>, logger: Logger) {
+fn stop_children(graph: &mut Graph, children: &mut HashMap<usize, ServiceChild>, logger: Logger) {
     for (index, mut child) in children.drain() {
         if let Err(error) = terminate_child(&mut child) {
             logger.warn(format!("failed to stop service {index}: {error}"));
@@ -489,6 +566,28 @@ mod tests {
             dependencies: Some(dependencies.iter().map(|name| (*name).to_owned()).collect()),
             watchlist: None,
         }
+    }
+
+    #[test]
+    fn watch_patterns_are_anchored_without_changing_alternatives() {
+        let mut watched = service("watch", &[]);
+        watched.watchlist = Some(vec!["foo|bar".to_owned()]);
+        let graph_result = generate_graph(&[watched]);
+        assert!(graph_result.is_ok());
+        let Some(graph) = graph_result.ok() else {
+            return;
+        };
+        let targets_result = super::compile_watch_targets(&graph, &[0]);
+        assert!(targets_result.is_ok());
+        let Some(targets) = targets_result.ok() else {
+            return;
+        };
+        let Some(pattern) = targets.first().and_then(|target| target.patterns.first()) else {
+            return;
+        };
+        assert!(pattern.is_match("foo/file.txt"));
+        assert!(pattern.is_match("bar/file.txt"));
+        assert!(!pattern.is_match("nested/foo/file.txt"));
     }
 
     #[test]
