@@ -8,6 +8,7 @@ chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 shell-words = "1"
+watchexec-events = "6"
 tokio = { version = "1", features = ["net", "rt", "signal", "time"] }
 watchexec = "8"
 watchexec-signals = "5"

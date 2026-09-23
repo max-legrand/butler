@@ -116,6 +116,7 @@ dependencies = [
  "shell-words",
  "tokio",
  "watchexec",
+ "watchexec-events",
  "watchexec-signals",
 ]
 

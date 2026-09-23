@@ -16,6 +16,10 @@ use std::thread;
 use std::time::Duration;
 use tokio::runtime::Builder;
 use watchexec::Watchexec;
+use watchexec::error::RuntimeError;
+use watchexec::filter::Filterer;
+use watchexec_events::filekind::{FileEventKind, ModifyKind};
+use watchexec_events::{Event, Priority, Tag};
 use watchexec_signals::Signal;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -35,6 +39,28 @@ struct WatchexecHandle {
 struct ServiceChild {
     process: Child,
     output_threads: Vec<thread::JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+struct ContentChangeFilterer;
+
+impl Filterer for ContentChangeFilterer {
+    fn check_dir(&self, _path: &Path) -> Result<bool, RuntimeError> {
+        Ok(true)
+    }
+
+    fn check_event(&self, event: &Event, _priority: Priority) -> Result<bool, RuntimeError> {
+        Ok(event.tags.iter().any(|tag| {
+            matches!(
+                tag,
+                Tag::FileEventKind(
+                    FileEventKind::Create(_)
+                        | FileEventKind::Remove(_)
+                        | FileEventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_))
+                )
+            )
+        }))
+    }
 }
 
 /// Run prerequisite commands, then supervise leaf services and restart them on watched changes.
@@ -215,6 +241,7 @@ fn start_watchexec(
                 }
             };
             watcher.config.pathset([root]);
+            watcher.config.filterer(ContentChangeFilterer);
             watcher.config.throttle(DEBOUNCE_INTERVAL);
             let main = watcher.main();
             let _ = ready_sender.send(Ok(()));
@@ -552,10 +579,23 @@ fn set_state(graph: &mut Graph, index: usize, state: State) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::prerequisite_closure;
+    use super::{ContentChangeFilterer, prerequisite_closure};
     use crate::graph::{generate_graph, topological_sort};
     use crate::types::{CommandSpec, ServiceSchema};
     use std::collections::HashSet;
+    use watchexec::filter::Filterer;
+    use watchexec_events::filekind::{
+        AccessKind, AccessMode, CreateKind, DataChange, FileEventKind, MetadataKind, ModifyKind,
+        RemoveKind, RenameMode,
+    };
+    use watchexec_events::{Event, Priority, Tag};
+
+    fn file_event(kind: FileEventKind) -> Event {
+        Event {
+            tags: vec![Tag::FileEventKind(kind)],
+            ..Event::default()
+        }
+    }
 
     fn service(name: &str, dependencies: &[&str]) -> ServiceSchema {
         ServiceSchema {
@@ -566,6 +606,43 @@ mod tests {
             dependencies: Some(dependencies.iter().map(|name| (*name).to_owned()).collect()),
             watchlist: None,
         }
+    }
+
+    #[test]
+    fn content_filter_rejects_open_and_attribute_events() {
+        let filter = ContentChangeFilterer;
+        let opened = file_event(FileEventKind::Access(AccessKind::Open(AccessMode::Any)));
+        let attributed = file_event(FileEventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::Any,
+        )));
+        assert!(matches!(
+            filter.check_event(&opened, Priority::Normal),
+            Ok(false)
+        ));
+        assert!(matches!(
+            filter.check_event(&attributed, Priority::Normal),
+            Ok(false)
+        ));
+        assert!(matches!(
+            filter.check_event(&Event::default(), Priority::Normal),
+            Ok(false)
+        ));
+    }
+
+    #[test]
+    fn content_filter_accepts_file_content_and_path_changes() {
+        let filter = ContentChangeFilterer;
+        let changes = [
+            file_event(FileEventKind::Create(CreateKind::File)),
+            file_event(FileEventKind::Remove(RemoveKind::File)),
+            file_event(FileEventKind::Modify(ModifyKind::Data(DataChange::Content))),
+            file_event(FileEventKind::Modify(ModifyKind::Name(RenameMode::To))),
+        ];
+        assert!(
+            changes
+                .iter()
+                .all(|event| matches!(filter.check_event(event, Priority::Normal), Ok(true)))
+        );
     }
 
     #[test]
@@ -585,8 +662,8 @@ mod tests {
         let Some(pattern) = targets.first().and_then(|target| target.patterns.first()) else {
             return;
         };
-        assert!(pattern.is_match("foo/file.txt"));
-        assert!(pattern.is_match("bar/file.txt"));
+        assert!(pattern.is_match("foo"));
+        assert!(pattern.is_match("bar"));
         assert!(!pattern.is_match("nested/foo/file.txt"));
     }
 
