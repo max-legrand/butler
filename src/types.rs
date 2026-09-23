@@ -20,6 +20,10 @@ pub struct ServiceSchema {
     pub name: String,
     /// Command string or executable and its arguments.
     pub command: CommandSpec,
+    /// Optional working directory for the service process.
+    /// Relative paths are resolved from Butler's working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
     /// Run a string command through the platform shell. Defaults to `false`.
     #[serde(rename = "run-as-shell", default)]
     pub run_as_shell: bool,

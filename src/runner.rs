@@ -2,7 +2,7 @@
 
 use crate::graph::{partition_helper, topological_sort};
 use crate::logger::Logger;
-use crate::types::{CommandSpec, Graph, State};
+use crate::types::{CommandSpec, Graph, ServiceSchema, State};
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -393,25 +393,7 @@ fn spawn_service(graph: &Graph, index: usize, logger: Logger) -> Result<ServiceC
         return Err("invalid graph node index".to_owned());
     };
     let service = &node.service;
-    let mut command = match (&service.command, service.run_as_shell) {
-        (CommandSpec::String(source), true) => shell_command(source),
-        (CommandSpec::String(source), false) => {
-            let arguments = shell_words::split(source).map_err(|error| {
-                format!(
-                    "invalid command string for service {}: {error}",
-                    service.name
-                )
-            })?;
-            direct_command(&arguments, &service.name)?
-        }
-        (CommandSpec::Args(arguments), false) => direct_command(arguments, &service.name)?,
-        (CommandSpec::Args(_), true) => {
-            return Err(format!(
-                "service {} sets run-as-shell but command is not a string",
-                service.name
-            ));
-        }
-    };
+    let mut command = prepare_command(service)?;
     #[cfg(unix)]
     command.process_group(0);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -459,6 +441,32 @@ fn log_output<R: std::io::Read + Send + 'static>(
             }
         }
     })
+}
+
+fn prepare_command(service: &ServiceSchema) -> Result<Command, String> {
+    let mut command = match (&service.command, service.run_as_shell) {
+        (CommandSpec::String(source), true) => shell_command(source),
+        (CommandSpec::String(source), false) => {
+            let arguments = shell_words::split(source).map_err(|error| {
+                format!(
+                    "invalid command string for service {}: {error}",
+                    service.name
+                )
+            })?;
+            direct_command(&arguments, &service.name)?
+        }
+        (CommandSpec::Args(arguments), false) => direct_command(arguments, &service.name)?,
+        (CommandSpec::Args(_), true) => {
+            return Err(format!(
+                "service {} sets run-as-shell but command is not a string",
+                service.name
+            ));
+        }
+    };
+    if let Some(cwd) = &service.cwd {
+        command.current_dir(cwd);
+    }
+    Ok(command)
 }
 
 fn direct_command(arguments: &[String], service_name: &str) -> Result<Command, String> {
@@ -579,7 +587,7 @@ fn set_state(graph: &mut Graph, index: usize, state: State) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentChangeFilterer, prerequisite_closure};
+    use super::{ContentChangeFilterer, prepare_command, prerequisite_closure};
     use crate::graph::{generate_graph, topological_sort};
     use crate::types::{CommandSpec, ServiceSchema};
     use std::collections::HashSet;
@@ -601,11 +609,34 @@ mod tests {
         ServiceSchema {
             name: name.to_owned(),
             command: CommandSpec::Args(vec!["dummy".to_owned()]),
+            cwd: None,
             run_as_shell: false,
             color: None,
             dependencies: Some(dependencies.iter().map(|name| (*name).to_owned()).collect()),
             watchlist: None,
         }
+    }
+
+    #[test]
+    fn service_command_uses_configured_working_directory() {
+        let mut configured = service("configured", &[]);
+        configured.cwd = Some("/tmp/project".to_owned());
+        let command_result = prepare_command(&configured);
+        assert!(command_result.is_ok());
+        let Some(command) = command_result.ok() else {
+            return;
+        };
+        assert_eq!(
+            command.get_current_dir(),
+            Some(std::path::Path::new("/tmp/project"))
+        );
+
+        let default_result = prepare_command(&service("default", &[]));
+        assert!(default_result.is_ok());
+        let Some(default_command) = default_result.ok() else {
+            return;
+        };
+        assert_eq!(default_command.get_current_dir(), None);
     }
 
     #[test]

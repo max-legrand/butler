@@ -92,9 +92,10 @@ command: "echo hello"
             CommandSpec::String("echo hello".to_owned())
         );
         assert!(!string_service.run_as_shell);
+        assert_eq!(string_service.cwd, None);
 
         let sequence_result = serde_yaml::from_str::<ServiceSchema>(
-            "name: argv\ncommand: [echo, hello]\nrun-as-shell: true\n",
+            "name: argv\ncommand: [echo, hello]\ncwd: ./project\nrun-as-shell: true\n",
         );
         assert!(sequence_result.is_ok());
         let Some(sequence_service) = sequence_result.ok() else {
@@ -105,6 +106,7 @@ command: "echo hello"
             CommandSpec::Args(vec!["echo".to_owned(), "hello".to_owned()])
         );
         assert!(sequence_service.run_as_shell);
+        assert_eq!(sequence_service.cwd.as_deref(), Some("./project"));
         assert!(validate_service_schema(&[sequence_service]).is_err());
     }
 }
