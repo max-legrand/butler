@@ -81,6 +81,16 @@ pub fn run(graph: &mut Graph, logger: Logger) -> Result<(), String> {
     let targets = compile_watch_targets(graph, &partition.services)?;
     let has_watch_targets = !targets.is_empty();
     let stop = Arc::new(AtomicBool::new(false));
+    // Services run in their own process groups, so the terminal's Ctrl-C never reaches
+    // them. Catch signals here so every exit path goes through `terminate_child`.
+    #[cfg(unix)]
+    for signal in [
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGHUP,
+    ] {
+        signal_hook::flag::register(signal, Arc::clone(&stop)).map_err(|error| error.to_string())?;
+    }
 
     if run_prerequisites(graph, &prerequisite_order, &stop, logger)? {
         return Ok(());

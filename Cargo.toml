@@ -14,6 +14,7 @@ watchexec = "8"
 watchexec-signals = "5"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+signal-hook = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }
