@@ -1,0 +1,15 @@
+(lang dune 3.22)
+
+(pkg enabled)
+
+(lock_dir
+ (path dune.lock)
+ (solve_for_platforms
+  ((arch x86_64)
+   (os linux))
+  ((arch arm64)
+   (os linux))
+  ((arch arm64)
+   (os macos))
+  ((arch x86_64)
+   (os macos))))
