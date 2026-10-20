@@ -93,9 +93,10 @@ command: "echo hello"
         );
         assert!(!string_service.run_as_shell);
         assert_eq!(string_service.cwd, None);
+        assert!(string_service.env.is_empty());
 
         let sequence_result = serde_yaml::from_str::<ServiceSchema>(
-            "name: argv\ncommand: [echo, hello]\ncwd: ./project\nrun-as-shell: true\n",
+            "name: argv\ncommand: [echo, hello]\ncwd: ./project\nrun-as-shell: true\nenv: {FOO: bar}\n",
         );
         assert!(sequence_result.is_ok());
         let Some(sequence_service) = sequence_result.ok() else {
@@ -107,6 +108,10 @@ command: "echo hello"
         );
         assert!(sequence_service.run_as_shell);
         assert_eq!(sequence_service.cwd.as_deref(), Some("./project"));
+        assert_eq!(
+            sequence_service.env.get("FOO").map(String::as_str),
+            Some("bar")
+        );
         assert!(validate_service_schema(&[sequence_service]).is_err());
     }
 }

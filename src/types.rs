@@ -24,6 +24,10 @@ pub struct ServiceSchema {
     /// Relative paths are resolved from Butler's working directory.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Environment variable overrides for the service process.
+    /// These are added to (or replace) the variables inherited from Butler.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
     /// Run a string command through the platform shell. Defaults to `false`.
     #[serde(rename = "run-as-shell", default)]
     pub run_as_shell: bool,

@@ -476,6 +476,7 @@ fn prepare_command(service: &ServiceSchema) -> Result<Command, String> {
     if let Some(cwd) = &service.cwd {
         command.current_dir(cwd);
     }
+    command.envs(&service.env);
     Ok(command)
 }
 
@@ -600,7 +601,7 @@ mod tests {
     use super::{ContentChangeFilterer, prepare_command, prerequisite_closure};
     use crate::graph::{generate_graph, topological_sort};
     use crate::types::{CommandSpec, ServiceSchema};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use watchexec::filter::Filterer;
     use watchexec_events::filekind::{
         AccessKind, AccessMode, CreateKind, DataChange, FileEventKind, MetadataKind, ModifyKind,
@@ -620,6 +621,7 @@ mod tests {
             name: name.to_owned(),
             command: CommandSpec::Args(vec!["dummy".to_owned()]),
             cwd: None,
+            env: HashMap::new(),
             run_as_shell: false,
             color: None,
             dependencies: Some(dependencies.iter().map(|name| (*name).to_owned()).collect()),
@@ -647,6 +649,27 @@ mod tests {
             return;
         };
         assert_eq!(default_command.get_current_dir(), None);
+    }
+
+    #[test]
+    fn service_command_applies_env_overrides() {
+        let mut configured = service("configured", &[]);
+        configured
+            .env
+            .insert("BUTLER_TEST".to_owned(), "value".to_owned());
+        let command_result = prepare_command(&configured);
+        assert!(command_result.is_ok());
+        let Some(command) = command_result.ok() else {
+            return;
+        };
+        let found = command.get_envs().find(|(key, _)| *key == "BUTLER_TEST");
+        assert_eq!(
+            found,
+            Some((
+                std::ffi::OsStr::new("BUTLER_TEST"),
+                Some(std::ffi::OsStr::new("value"))
+            ))
+        );
     }
 
     #[test]
